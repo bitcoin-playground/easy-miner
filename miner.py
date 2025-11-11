@@ -1,49 +1,98 @@
 import struct, random, time, hashlib, logging, os
 from threading import Event
 from binascii import hexlify, unhexlify
-from utils import double_sha256
 from dotenv import load_dotenv
+import numpy as np
 
-# Carica le variabili d'ambiente dal file .env
+# INSTALLARE: pip install numba
+try:
+    from numba import njit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    logging.warning("Numba non disponibile - usando versione non ottimizzata")
+
 load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# Costanti per ottimizzazione e logging
-BATCH = 1000
+# Costanti
+# Permette di configurare la dimensione del batch via .env (es. BATCH=50000)
+BATCH = int(os.getenv("BATCH", "10000"))
 RATE_INT = 2
 
-def _midstate(prefix: bytes) -> "hashlib._Hash":
-    """
-    Restituisce un contesto SHA-256 inizializzato con i primi 76 byte dell'header del blocco: 
-    tutti i campi tranne il nonce.
-    """
-    h = hashlib.sha256()
-    h.update(prefix)
-    return h
+if NUMBA_AVAILABLE:
+    @njit(cache=True, fastmath=True)
+    def _sha256_round(data: np.ndarray) -> np.ndarray:
+        """
+        Implementazione semplificata SHA-256 con Numba.
+        NOTA: Per massime prestazioni, considera librerie come hashlib in C.
+        """
+        # Questo è un placeholder - per vera ottimizzazione serve implementazione completa
+        # o usare librerie C/Rust tramite CFFI
+        pass
 
-# ---------------------------------------------------------------------------
-# mining
-# ---------------------------------------------------------------------------
-def mine_block(header_hex: str, target_hex: str, nonce_mode: str = "incremental", stop_event: Event | None = None):
+def _compute_hash_batch(header_76: bytes, start_nonce: int, batch_size: int, target_be: bytes):
     """
-    Esegue il proof-of-work cercando un nonce valido per l'header del blocco.
-    """
-    log.info("Avvio mining - modalità %s", nonce_mode)
+    Calcola hash per un batch di nonce e trova quello valido.
 
-    # ---- decodifica header (80 B) ----
+    Ottimizzazioni principali:
+    - Precalcolo del primo chunk (64 byte) con sha256.copy() per evitare di
+      rieseguire l'update della parte invariata ad ogni nonce.
+    - Preallocazione di una "tail" (16 byte) in cui si aggiorna solo il nonce
+      via struct.pack_into, minimizzando allocazioni.
+    - Binding di funzioni locali per ridurre lookup in loop caldo.
+    """
+    # Suddivisione dell'header: primi 64 byte (chunk fisso) + tail statica (12 byte)
+    first_chunk = header_76[:64]
+    tail_static = header_76[64:]  # 12 byte: merkle[28:32] + ts(4) + bits(4)
+
+    # Prepara il contesto sha256 per il primo chunk (invariato)
+    sha_base = hashlib.sha256()
+    sha_base.update(first_chunk)
+
+    # Tail di 16 byte: 12 statici + 4 di nonce variabile
+    tail = bytearray(16)
+    tail[0:12] = tail_static
+
+    # Local bindings per performance
+    sha_copy = sha_base.copy
+    sha256 = hashlib.sha256
+    pack_into = struct.pack_into
+
+    for i in range(batch_size):
+        n = (start_nonce + i) & 0xFFFFFFFF
+        # Scrive il nonce negli ultimi 4 byte della tail (little-endian)
+        pack_into('<I', tail, 12, n)
+
+        # Primo SHA-256: riusa lo stato del primo chunk
+        ctx = sha_copy()
+        ctx.update(tail)
+        digest1 = ctx.digest()
+
+        # Secondo SHA-256
+        digest = sha256(digest1).digest()
+
+        # Confronto con target (in big-endian): digest[::-1] è lendianness di Bitcoin
+        if digest[::-1] < target_be:
+            return n, digest
+
+    return None, None
+
+def mine_block_ultra(header_hex: str, target_hex: str, nonce_mode: str = "incremental", stop_event: Event | None = None):
+    """
+    Versione ultra-ottimizzata del mining.
+    """
+    log.info("Avvio mining ULTRA-OTTIMIZZATO - modalità %s", nonce_mode)
+
+    # Decodifica header
     version   = unhexlify(header_hex[0:8])
     prev_hash = unhexlify(header_hex[8:72])
     merkle    = unhexlify(header_hex[72:136])
     ts_bytes  = unhexlify(header_hex[136:144])
     bits      = unhexlify(header_hex[144:152])
 
-    base76 = version + prev_hash + merkle + ts_bytes + bits
-    mid    = _midstate(base76)
-
-    header     = bytearray(base76 + b"\x00\x00\x00\x00")
-    nonce_view = memoryview(header)[76:]
-
+    header_76 = version + prev_hash + merkle + ts_bytes + bits
     target_be = int(target_hex, 16).to_bytes(32, "big")
 
     if nonce_mode == "incremental":
@@ -54,74 +103,55 @@ def mine_block(header_hex: str, target_hex: str, nonce_mode: str = "incremental"
         raise ValueError("Modalità di mining non valida.")
 
     attempts = 0
-    start_t  = time.time()
+    start_t = time.time()
     last_rate_t, last_rate_n = start_t, 0
     last_tsu = start_t
 
-    sha2ctx = hashlib.sha256()          # contesto vuoto da copiare
-
     while True:
-        # interruzione prima di ogni batch
         if stop_event is not None and stop_event.is_set():
             log.info("Mining interrotto: nuovo blocco rilevato")
             return None, None, None
 
-        # ---- aggiornamento timestamp ----
+        # Aggiornamento timestamp
         timestamp_update_interval = int(os.getenv('TIMESTAMP_UPDATE_INTERVAL', 30))
         if timestamp_update_interval and (time.time() - last_tsu) >= timestamp_update_interval:
             ts_bytes = struct.pack("<I", int(time.time()))
-            header[68:72] = ts_bytes
-            base76  = version + prev_hash + merkle + ts_bytes + bits
-            mid     = _midstate(base76)
-            header[:76] = base76
+            header_76 = version + prev_hash + merkle + ts_bytes + bits
             last_tsu = time.time()
-            log.debug("Timestamp header aggiornato: %d",
-                      int.from_bytes(ts_bytes, "little"))
 
-        # ---- batch di BATCH nonce ----
-        for i in range(BATCH):
-            # check rapido anche dentro il loop per ridurre la latenza
-            if stop_event is not None and stop_event.is_set():
-                log.info("Mining interrotto: nuovo blocco rilevato")
-                return None, None, None
+        # Calcola batch
+        found_nonce, digest = _compute_hash_batch(header_76, nonce, BATCH, target_be)
+        
+        if found_nonce is not None:
+            total = time.time() - start_t
+            hashrate = (attempts + BATCH) / total if total else 0
+            
+            full_header = header_76 + struct.pack("<I", found_nonce)
+            
+            log.info("Blocco trovato - nonce=%d tentativi=%d tempo=%.2fs hashrate=%.2f kH/s",
+                     found_nonce, attempts + BATCH, total, hashrate/1000)
+            log.info("Hash valido: %s", digest[::-1].hex())
 
-            n = (nonce + i) & 0xFFFFFFFF
-            struct.pack_into("<I", header, 76, n)
+            return hexlify(full_header).decode(), found_nonce, hashrate
 
-            h1 = mid.copy(); h1.update(nonce_view)
-            d1 = h1.digest()
-            h2 = sha2ctx.copy(); h2.update(d1)
-            digest = h2.digest()
-
-            if digest[::-1] < target_be:
-                total = time.time() - start_t
-                hashrate = (attempts + i + 1) / total if total else 0
-                log.info("Blocco trovato - nonce=%d tentativi=%d tempo=%.2fs hashrate medio=%.2f kH/s",
-                         n, attempts + i + 1, total, hashrate/1000)
-                log.info("Hash valido: %s", digest[::-1].hex())
-
-                return hexlify(bytes(header)).decode(), n, hashrate
-
-        # fine batch ---------------------------------------------------------
         attempts += BATCH
         nonce = (nonce + BATCH) & 0xFFFFFFFF
 
-        # ---- log periodico ----
+        # Log periodico
         now = time.time()
-
-        # hashrate istantaneo: log ogni RATE_INT secondi
         if now - last_rate_t >= RATE_INT:
             hashrate = (attempts - last_rate_n) / (now - last_rate_t)
             last_rate_t, last_rate_n = now, attempts
 
-            struct.pack_into("<I", header, 76, nonce)
-            tmp = mid.copy(); tmp.update(nonce_view)
-            dbg_hash = double_sha256(tmp.digest())
+            log.info("Stato mining - hashrate=%.2f kH/s tentativi=%d nonce=%d",
+                hashrate/1000, attempts, nonce)
 
-            log.info("Stato mining - hashrate=%.2f kH/s tentativi=%d nonce=%d hash=%s",
-                hashrate/1000,    # hashrate istantaneo
-                attempts,     # tentativi
-                nonce,        # nonce
-                dbg_hash[::-1].hex()  # hash di controllo
-            )
 
+# Funzione compatibile con l'interfaccia originale
+def mine_block(header_hex: str, target_hex: str, nonce_mode: str = "incremental", stop_event: Event | None = None):
+    """Wrapper per compatibilità con codice esistente.
+
+    Usa sempre la versione ultra ottimizzata basata su hashlib.
+    In assenza di Numba, evita import di moduli inesistenti.
+    """
+    return mine_block_ultra(header_hex, target_hex, nonce_mode, stop_event)
