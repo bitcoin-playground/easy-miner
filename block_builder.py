@@ -36,7 +36,7 @@ def build_coinbase_transaction(template, miner_script_pubkey, extranonce1, extra
     wc_raw  = template.get("default_witness_commitment")          # può essere script o sola radice
     segwit  = bool(wc_raw)
 
-    tx_version = struct.pack("<I", template["version"]).hex()
+    tx_version = struct.pack("<I", 2).hex()  # coinbase tx versione 2 (BIP68/SegWit)
     parts = [tx_version]
     if segwit:
         parts.append("0001")                                      # marker+flag

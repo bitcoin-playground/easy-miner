@@ -1,131 +1,139 @@
-import time, threading, hashlib, logging, os
-from dotenv import load_dotenv
-from rpc import (
-    connect_rpc, test_rpc_connection, get_block_template, ensure_witness_data,
-    submit_block, get_best_block_hash 
-)
+import hashlib
+import logging
+import threading
+import time
+
+import config
 from block_builder import (
-    calculate_merkle_root, build_block_header, is_segwit_tx,
-    serialize_block, build_coinbase_transaction
+    build_block_header, build_coinbase_transaction,
+    calculate_merkle_root, is_segwit_tx, serialize_block,
 )
 from miner import mine_block
+from rpc import (
+    connect_rpc, get_best_block_hash, get_block_template,
+    ensure_witness_data, submit_block, test_rpc_connection,
+)
 from utils import calculate_target, watchdog_bestblock
-
-# Carica le variabili d'ambiente dal file .env
-load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# Parametri mining
-EXTRANONCE1 = "1234567890abcdef"
-EXTRANONCE2 = "12341234"
 
-# Intervallo controllo best-block
-CHECK_INTERVAL = 20
+def _prepare_template(rpc) -> dict | None:
+    """Ottiene e arricchisce il template di blocco. Ritorna None in caso di errore."""
+    template = get_block_template(rpc)
+    if not template:
+        return None
+    ensure_witness_data(rpc, template)
+    tot_tx     = len(template["transactions"])
+    witness_tx = sum(1 for tx in template["transactions"] if is_segwit_tx(tx["data"]))
+    log.info(
+        "Template altezza=%d  tx totali=%d  legacy=%d  segwit=%d",
+        template["height"], tot_tx, tot_tx - witness_tx, witness_tx,
+    )
+    return template
 
 
+def main(
+    event_queue=None,
+    worker_idx: int = 0,
+    extranonce2: str | None = None,
+) -> None:
+    """
+    Ciclo principale di mining.
 
+    Parametri opzionali per l'uso multiprocesso via launcher:
+      event_queue  – coda su cui inviare eventi strutturati al supervisore
+      worker_idx   – indice del worker (per identificazione negli eventi)
+      extranonce2  – valore extranonce2 specifico del worker
+    """
+    extranonce2 = extranonce2 or config.EXTRANONCE2
 
-# --------------------------- ciclo principale --------------------------------
-def main():
-    # TEST RPC
     test_rpc_connection()
-    
-    # Log dell'extranonce2 utilizzato
-    log.info(f"Extranonce2 utilizzato: {EXTRANONCE2}")
+    log.info("Extranonce2: %s | Coinbase: %s", extranonce2, config.COINBASE_MESSAGE)
+
+    # Connessione principale riutilizzata per tutto il ciclo di vita del processo
+    rpc = connect_rpc()
+
+    # Recupera rete e scriptPubKey una volta sola — non cambiano tra i cicli
+    network      = rpc.getblockchaininfo().get("chain", "")
+    miner_script = rpc.getaddressinfo(config.WALLET_ADDRESS)["scriptPubKey"]
+    log.info("Rete: %s", network)
+
+    def _on_status(attempts: int, hashrate: float) -> None:
+        if event_queue is not None:
+            event_queue.put(("status", worker_idx, {"rate": hashrate / 1000, "attempts": attempts}))
 
     while True:
         try:
             log.info("=== Nuovo ciclo di mining ===")
 
-            # STEP 1) Ottieni una nuova connessione per il template
-            rpc_template = connect_rpc()
-
-            # STEP 2) GET BLOCK TEMPLATE
-            template = get_block_template(rpc_template)
+            # STEP 1-3: template
+            template = _prepare_template(rpc)
             if not template:
-                log.error("Impossibile ottenere il template del blocco. Riprovo...")
+                log.error("Impossibile ottenere il template. Riprovo tra 5s…")
                 time.sleep(5)
                 continue
 
-            # STEP 3) Assicurarsi di avere transazioni con dati completi
-            ensure_witness_data(rpc_template, template)
-
-            tot_tx       = len(template["transactions"])
-            witness_tx   = sum(1 for tx in template["transactions"] if is_segwit_tx(tx["data"]))
-            legacy_tx    = tot_tx - witness_tx
-
-            log.info(f"Transazioni nel template: totali = {tot_tx}  |  legacy = {legacy_tx}  |  segwit = {witness_tx}")
-
-            # STEP 4) COSTRUISCI COINBASE
-            wallet_address = os.getenv('WALLET_ADDRESS')
-            miner_info = rpc_template.getaddressinfo(wallet_address)
-            miner_script_pubkey = miner_info["scriptPubKey"]
-            coinbase_message = os.getenv('COINBASE_MESSAGE')
+            # STEP 4: coinbase
             coinbase_tx, coinbase_txid = build_coinbase_transaction(
-                template, miner_script_pubkey, EXTRANONCE1, EXTRANONCE2, coinbase_message
+                template, miner_script,
+                config.EXTRANONCE1, extranonce2,
+                config.COINBASE_MESSAGE,
             )
-            log.info(f"Messaggio nella coinbase: {coinbase_message}")
 
-            # STEP 5) CALCOLA TARGET
-            modified_target = calculate_target(template, float(os.getenv('DIFFICULTY_FACTOR', 1.0)), rpc_template.getblockchaininfo().get("chain", ""))
-
-            # STEP 6) CALCOLA MERKLE ROOT
-            merkle_root = calculate_merkle_root(coinbase_txid, template["transactions"])
-
-            # STEP 7) COSTRUISCI HEADER
-            header_hex = build_block_header(
+            # STEP 5-7: target, merkle root, header
+            modified_target = calculate_target(template, config.DIFFICULTY_FACTOR, network)
+            merkle_root     = calculate_merkle_root(coinbase_txid, template["transactions"])
+            header_hex      = build_block_header(
                 template["version"], template["previousblockhash"],
-                merkle_root, template["curtime"], template["bits"], 0
+                merkle_root, template["curtime"], template["bits"], 0,
             )
 
-            # ---------- watchdog: avvia thread di controllo best-block ----------
-            stop_event = threading.Event()
-            rpc_watch  = connect_rpc()
+            # STEP 8: avvia watchdog e mining
+            stop_event      = threading.Event()
             new_block_event = threading.Event()
+            rpc_watch       = connect_rpc()
             t_watch = threading.Thread(
-                target=watchdog_bestblock, args=(rpc_watch, stop_event, new_block_event, get_best_block_hash), daemon=True
+                target=watchdog_bestblock,
+                args=(rpc_watch, stop_event, new_block_event, get_best_block_hash),
+                daemon=True,
             )
             t_watch.start()
 
-            # STEP 8) MINING
-            nonce_mode = os.getenv('NONCE_MODE', 'mixed')
             mined_header_hex, nonce, hashrate = mine_block(
-                header_hex, modified_target, nonce_mode, stop_event
+                header_hex, modified_target, config.NONCE_MODE, stop_event, _on_status,
             )
 
-            # Chiudi watchdog
             stop_event.set()
             t_watch.join(timeout=0.2)
 
-            # se il mining è stato interrotto da nuovo blocco → ricomincia il ciclo
             if new_block_event.is_set() or mined_header_hex is None:
-                log.info("Nuovo blocco minato: riparto con un template aggiornato")
+                log.info("Ciclo interrotto: riparto con template aggiornato")
                 continue
 
-            # STEP 9) SERIALIZZA IL BLOCCO
-            serialized_block = serialize_block(
-                mined_header_hex, coinbase_tx, template["transactions"]
-            )
-            if not serialized_block:
-                log.error("Blocco non serializzato correttamente. Riprovo...")
-                continue
-
-            # STEP 10) CALCOLA L'HASH DEL BLOCCO E INVIALO
-            # Calcola l'hash del blocco dall'header
+            # STEP 9: hash del blocco e notifica al supervisore
             header_bytes = bytes.fromhex(mined_header_hex)
-            block_hash = hashlib.sha256(hashlib.sha256(header_bytes).digest()).digest()[::-1].hex()
-            log.info(f"Hash del blocco trovato: {block_hash}")
-            
-            # Invia il blocco
-            rpc_submit = connect_rpc()
-            submit_block(rpc_submit, serialized_block)
+            block_hash   = hashlib.sha256(hashlib.sha256(header_bytes).digest()).digest()[::-1].hex()
+            log.info("Hash del blocco trovato: %s", block_hash)
+
+            if event_queue is not None:
+                event_queue.put(("found", worker_idx, {"rate": hashrate / 1000 if hashrate else 0}))
+                event_queue.put(("hash", worker_idx, block_hash))
+
+            # STEP 10: serializza e invia
+            serialized_block = serialize_block(mined_header_hex, coinbase_tx, template["transactions"])
+            if not serialized_block:
+                log.error("Serializzazione blocco fallita. Riprovo…")
+                continue
+
+            submit_block(rpc, serialized_block)
+
+            if event_queue is not None:
+                event_queue.put(("submit", worker_idx, None))
 
         except Exception:
             log.exception("Errore nel ciclo di mining")
 
-        # Pausa prima di iniziare un nuovo ciclo
-        log.info("Ciclo completato, in attesa del prossimo ciclo...")
         time.sleep(1)
 
 
