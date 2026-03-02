@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import threading
 import time
@@ -15,7 +14,7 @@ from rpc import (
     ensure_witness_data, submit_block, test_rpc_connection,
     wait_for_new_template,
 )
-from utils import calculate_target, watchdog_longpoll
+from utils import calculate_target, double_sha256, watchdog_longpoll
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +69,7 @@ def main(
 
     def _on_status(attempts: int, hashrate: float) -> None:
         if event_queue is not None:
-            event_queue.put(("status", worker_idx, {"rate": hashrate / 1000, "attempts": attempts}))
+            event_queue.put(("status", worker_idx, {"rate": hashrate, "attempts": attempts}))
 
     while True:
         try:
@@ -95,7 +94,7 @@ def main(
             merkle_root     = calculate_merkle_root(coinbase_txid, template["transactions"])
             header_hex      = build_block_header(
                 template["version"], template["previousblockhash"],
-                merkle_root, template["curtime"], template["bits"], 0,
+                merkle_root, template["curtime"], template["bits"],
             )
 
             # STEP 8: avvia watchdog long-poll e mining
@@ -122,11 +121,11 @@ def main(
 
             # STEP 9: hash del blocco e notifica al supervisore
             header_bytes = bytes.fromhex(mined_header_hex)
-            block_hash   = hashlib.sha256(hashlib.sha256(header_bytes).digest()).digest()[::-1].hex()
+            block_hash   = double_sha256(header_bytes)[::-1].hex()
             log.info("Hash del blocco trovato: %s", block_hash)
 
             if event_queue is not None:
-                event_queue.put(("found", worker_idx, {"rate": hashrate / 1000 if hashrate else 0}))
+                event_queue.put(("found", worker_idx, {"rate": hashrate or 0.0}))
                 event_queue.put(("hash", worker_idx, block_hash))
 
             # STEP 10: serializza e invia

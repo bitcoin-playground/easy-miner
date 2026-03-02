@@ -9,6 +9,14 @@ import config
 log = logging.getLogger(__name__)
 
 
+def fmt_hashrate(hz: float) -> str:
+    """Formatta un hashrate in H/s nella unità più leggibile (mai > 999)."""
+    for unit, factor in (("TH/s", 1e12), ("GH/s", 1e9), ("MH/s", 1e6), ("kH/s", 1e3)):
+        if hz >= factor:
+            return f"{hz / factor:,.2f} {unit}"
+    return f"{hz:,.2f} H/s"
+
+
 def double_sha256(data: bytes) -> bytes:
     """Esegue il doppio SHA-256 su un dato."""
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()

@@ -118,7 +118,7 @@ def calculate_merkle_root(coinbase_txid: str, transactions: list[dict]) -> str:
 
     return hexlify(tx_hashes[0][::-1]).decode()
 
-def build_block_header(version, prev_hash, merkle_root, timestamp, bits, nonce):
+def build_block_header(version, prev_hash, merkle_root, timestamp, bits, nonce=0):
     """
     Costruisce gli 80 byte dell'header del blocco e li restituisce in formato esadecimale.
     """

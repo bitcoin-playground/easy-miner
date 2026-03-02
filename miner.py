@@ -10,6 +10,7 @@ from threading import Event
 from typing import Callable
 
 import config
+from utils import fmt_hashrate
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ def mine_block(
     backend = "C extension" if _lib is not None else "Python fallback"
     log.info("Avvio mining — modalità %s | backend: %s", nonce_mode, backend)
 
-    if nonce_mode not in ("incremental", "random", "mixed"):
+    if nonce_mode not in ("incremental", "random"):
         raise ValueError(f"Modalità di mining non valida: {nonce_mode!r}")
 
     version   = unhexlify(header_hex[0:8])
@@ -155,8 +156,8 @@ def mine_block(
             hashrate    = (attempts + batch_size) / total if total else 0
             full_header = header_76 + struct.pack("<I", found_nonce)
             log.info(
-                "Blocco trovato — nonce=%d | %s hash | %.2fs | %s kH/s",
-                found_nonce, f"{attempts+batch_size:,}", total, f"{hashrate/1000:,.0f}",
+                "Blocco trovato — nonce=%d | %s hash | %.2fs | %s",
+                found_nonce, f"{attempts+batch_size:,}", total, fmt_hashrate(hashrate),
             )
             log.info("Hash valido: %s", digest[::-1].hex())
             return hexlify(full_header).decode(), found_nonce, hashrate
@@ -170,8 +171,8 @@ def mine_block(
             last_rate_t = now
             last_rate_n = attempts
             log.info(
-                "hashrate %s kH/s  |  %s hash  |  nonce %d",
-                f"{hashrate/1000:,.0f}", f"{attempts:,}", nonce,
+                "hashrate %s  |  %s hash  |  nonce %d",
+                fmt_hashrate(hashrate), f"{attempts:,}", nonce,
             )
             if status_callback:
                 status_callback(attempts, hashrate)

@@ -10,6 +10,7 @@ import time
 
 import config
 import log_setup
+from utils import fmt_hashrate
 
 log = logging.getLogger(__name__)
 
@@ -67,13 +68,16 @@ def _aggregate(q: mp.Queue, n: int) -> str:
     Ritorna "restart" quando un blocco viene trovato e inviato.
     """
     rates:    list[float] = [0.0] * n
-    attempts: list[int]   = [0]   * n
+    attempts: list[int]   = [0]   * n   # tentativi sessione corrente per worker
     block_hash:   str | None  = None
     winner_idx:   int | None  = None
     winner_rate:  float | None = None
 
-    t_start     = time.time()
-    last_print  = 0.0
+    # Contatore cumulativo monotono: non si azzera al refresh del template
+    cumulative_att: int         = 0
+    t_first_status: float | None = None  # primo hash ricevuto → inizio mining reale
+
+    last_print    = 0.0
     lines_printed = 0
 
     while True:
@@ -81,8 +85,14 @@ def _aggregate(q: mp.Queue, n: int) -> str:
             tag, idx, val = q.get(timeout=0.1)
 
             if tag == "status":
+                new_val = val["attempts"]
+                old_val = attempts[idx]
+                # delta >= 0: stessa sessione; delta < 0: template refreshato → nuova sessione
+                cumulative_att += new_val if new_val < old_val else new_val - old_val
                 rates[idx]    = val["rate"]
-                attempts[idx] = val["attempts"]
+                attempts[idx] = new_val
+                if t_first_status is None:
+                    t_first_status = time.time()
             elif tag == "found":
                 winner_idx  = idx
                 winner_rate = val.get("rate") if val else None
@@ -90,18 +100,17 @@ def _aggregate(q: mp.Queue, n: int) -> str:
                 block_hash = val
             elif tag == "submit":
                 _clear_lines(lines_printed)
-                elapsed    = time.time() - t_start
-                total_att  = sum(attempts)
-                avg_rate_k = total_att / elapsed / 1000 if elapsed else 0.0
+                elapsed     = time.time() - t_first_status if t_first_status else 0.0
+                avg_rate_hz = cumulative_att / elapsed if elapsed else 0.0
                 print("=" * 78)
                 print("[✓] BLOCCO TROVATO E INVIATO")
                 print(f"  • Hash: {block_hash or 'N/D'}")
                 if winner_idx is not None:
                     print(f"  • Worker: {winner_idx}")
                 if winner_rate is not None:
-                    print(f"  • Hashrate worker: {winner_rate:.2f} kH/s")
-                print(f"  • Hashrate medio totale: {avg_rate_k:,.2f} kH/s")
-                print(f"  • Tentativi totali: {total_att:,}")
+                    print(f"  • Hashrate worker: {fmt_hashrate(winner_rate)}")
+                print(f"  • Hashrate medio totale: {fmt_hashrate(avg_rate_hz)}")
+                print(f"  • Tentativi totali: {cumulative_att:,}")
                 print("=" * 78)
                 return "restart"
 
@@ -114,17 +123,16 @@ def _aggregate(q: mp.Queue, n: int) -> str:
                 _clear_lines(lines_printed)
 
             tot_rate = sum(rates)
-            tot_att  = sum(attempts)
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
 
             lines = [
                 f"{ts} | STATO MINING",
                 "=" * 40,
-                f"Totale: {tot_rate:,.2f} kH/s | Tentativi: {tot_att:,}",
+                f"Totale: {fmt_hashrate(tot_rate)} | Tentativi: {cumulative_att:,}",
                 "-" * 40,
             ]
             for i in range(n):
-                lines.append(f"Worker {i:<2}: {rates[i]:.2f} kH/s  | Tentativi: {attempts[i]:,}")
+                lines.append(f"Worker {i:<2}: {fmt_hashrate(rates[i])}  | Tentativi: {attempts[i]:,}")
 
             print("\n".join(lines), flush=True)
             lines_printed = len(lines)
