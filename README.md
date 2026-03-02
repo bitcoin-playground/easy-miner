@@ -1,6 +1,6 @@
 # Bitcoin Mining (GetBlockTemplate)
 
-Questo progetto implementa un sistema completo di mining Bitcoin educativo che utilizza il protocollo **GetBlockTemplate** per interagire con un nodo Bitcoin Core tramite chiamate RPC (Remote Procedure Call). Il programma è progettato specificamente per scopi didattici e di apprendimento, offrendo una comprensione approfondita dei meccanismi interni del mining di Bitcoin, dalla costruzione dei blocchi al processo di Proof-of-Work.
+Questo progetto implementa un sistema completo di mining Bitcoin educativo che utilizza il protocollo **GetBlockTemplate** per interagire con un nodo Bitcoin Core tramite chiamate RPC (Remote Procedure Call). Il programma è progettato specificamente per scopi didattici e di apprendimento, offrendo una comprensione approfondita dei meccanismi interni del mining di Bitcoin, dalla costruzione dei blocchi al processo di Proof-of-Work. Il miner è ottimizzato per architetture ARM (ARM64 con estensioni Crypto), mantenendo al contempo compatibilità x86_64.
 
 ## Caratteristiche Principali
 
@@ -14,6 +14,19 @@ Questo progetto implementa un sistema completo di mining Bitcoin educativo che u
 - **Sistema di watchdog** per il rilevamento di nuovi blocchi sulla rete
 - **Configurazione flessibile della difficoltà** per ambienti di test
 - **Logging colorato** con formattazione ANSI e metriche di performance in tempo reale
+
+## Compilazione Rapida `miner_core.so`
+
+```bash
+cd native
+make clean && make
+cd ..
+```
+
+Verifica:
+```bash
+ls -lh native/miner_core.so
+```
 
 ## Funzionamento Teorico del Mining di Bitcoin
 
