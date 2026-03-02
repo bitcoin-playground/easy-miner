@@ -49,18 +49,24 @@ def main(
       extranonce2  – valore extranonce2 specifico del worker
     """
     extranonce2 = extranonce2 or config.EXTRANONCE2
-
-    test_rpc_connection()
     log.info("Extranonce2: %s | Coinbase: %s", extranonce2, config.COINBASE_MESSAGE)
 
-    # Connessioni RPC riutilizzate per tutto il ciclo di vita del processo
-    rpc       = connect_rpc()
-    rpc_watch = connect_rpc()  # connessione dedicata al watchdog (può bloccare in long-poll)
-
-    # Recupera rete e scriptPubKey una volta sola — non cambiano tra i cicli
-    network      = rpc.getblockchaininfo().get("chain", "")
-    miner_script = rpc.getaddressinfo(config.WALLET_ADDRESS)["scriptPubKey"]
-    log.info("Rete: %s", network)
+    # Inizializzazione con retry: connessioni RPC e dati statici (rete, scriptPubKey).
+    # Necessario perché N worker partono in contemporanea e uno può avere un errore
+    # RPC transitorio — senza retry il processo muore permanentemente.
+    rpc = rpc_watch = network = miner_script = None
+    while True:
+        try:
+            test_rpc_connection()
+            rpc       = connect_rpc()
+            rpc_watch = connect_rpc(timeout=300)
+            network      = rpc.getblockchaininfo().get("chain", "")
+            miner_script = rpc.getaddressinfo(config.WALLET_ADDRESS)["scriptPubKey"]
+            log.info("Rete: %s", network)
+            break
+        except Exception:
+            log.exception("Errore di inizializzazione — riprovo tra 5s…")
+            time.sleep(5)
 
     def _on_status(attempts: int, hashrate: float) -> None:
         if event_queue is not None:

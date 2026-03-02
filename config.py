@@ -28,5 +28,3 @@ EXTRANONCE2               = os.getenv("EXTRANONCE2", "12341234")
 _n             = int(os.getenv("NUM_PROCESSORS", "0"))
 NUM_PROCESSORS = _n if _n > 0 else mp.cpu_count()
 
-# Watchdog
-CHECK_INTERVAL = 20

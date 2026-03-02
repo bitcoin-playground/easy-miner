@@ -7,10 +7,15 @@ import config
 log = logging.getLogger(__name__)
 
 
-def connect_rpc() -> AuthServiceProxy:
-    """Crea una connessione RPC al nodo Bitcoin."""
+def connect_rpc(timeout: int = 30) -> AuthServiceProxy:
+    """Crea una connessione RPC al nodo Bitcoin.
+
+    timeout: secondi prima che la connessione HTTP scada.
+    Usare un valore alto (es. 300) per connessioni dedicate al long-polling.
+    """
     return AuthServiceProxy(
-        f"http://{config.RPC_USER}:{config.RPC_PASSWORD}@{config.RPC_HOST}:{config.RPC_PORT}"
+        f"http://{config.RPC_USER}:{config.RPC_PASSWORD}@{config.RPC_HOST}:{config.RPC_PORT}",
+        timeout=timeout,
     )
 
 
@@ -50,22 +55,24 @@ def get_block_template(rpc) -> dict | None:
         return None
 
 
-def wait_for_new_template(rpc, longpollid: str) -> None:
+def wait_for_new_template(rpc, longpollid: str) -> bool:
     """
     Blocca finché Bitcoin Core segnala un nuovo template tramite long-polling.
 
     Passa longpollid alla chiamata getblocktemplate: il nodo risponde solo
     quando c'è un nuovo blocco o una variazione significativa delle transazioni.
-    Se la chiamata scade o fallisce, ritorna comunque (il chiamante riproverà).
 
-    Non restituisce il nuovo template — viene ignorato perché main.py lo
-    recupererà con get_block_template() nella normale iterazione del ciclo.
+    Ritorna True se il nodo ha risposto con un nuovo template (nuovo blocco).
+    Ritorna False se la chiamata è scaduta o ha prodotto un errore di rete:
+    in questo caso il chiamante deve fare retry senza riavviare il mining.
     """
     try:
         rpc.getblocktemplate({"rules": ["segwit"], "longpollid": longpollid})
         log.debug("Long-poll completato: nuovo template disponibile")
+        return True
     except Exception as e:
-        log.debug("Long-poll terminato (timeout o errore): %s", e)
+        log.debug("Long-poll timeout o errore (retry): %s", e)
+        return False
 
 
 def ensure_witness_data(rpc, template: dict) -> None:

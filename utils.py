@@ -63,22 +63,23 @@ def watchdog_longpoll(
     """
     Watchdog basato su long-polling getblocktemplate.
 
-    Invece di interrogare il nodo ogni CHECK_INTERVAL secondi, chiama
-    getblocktemplate con longpollid: il nodo risponde solo quando c'è
-    un nuovo blocco (latenza < 1 secondo vs i 20 secondi del polling).
+    Chiama getblocktemplate con longpollid: il nodo risponde solo quando c'è
+    un nuovo blocco (latenza < 1 secondo vs polling periodico).
 
-    Quando la long-poll ritorna, imposta new_block_event e stop_event
+    Se la chiamata scade per timeout di rete, fa retry senza interrompere
+    il mining — solo una risposta genuina del nodo triggera lo stop.
+    Quando il nodo risponde, imposta new_block_event e stop_event
     per interrompere il miner corrente entro il prossimo batch.
     """
     log.debug("Watchdog long-poll avviato (longpollid=%s…)", longpollid[:16])
-    if stop_event.is_set():
-        return
 
-    wait_for_new_template_func(rpc_conn, longpollid)
-
-    if not stop_event.is_set():
-        log.info("Long-poll: nuovo blocco rilevato, interruzione mining")
-        new_block_event.set()
-        stop_event.set()
+    while not stop_event.is_set():
+        new_block = wait_for_new_template_func(rpc_conn, longpollid)
+        if new_block:
+            if not stop_event.is_set():
+                log.info("Long-poll: nuovo blocco rilevato, interruzione mining")
+                new_block_event.set()
+                stop_event.set()
+            break
 
     log.debug("Watchdog long-poll fermato.")
