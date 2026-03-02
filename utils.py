@@ -64,7 +64,7 @@ def watchdog_bestblock(
     Quando viene rilevato, imposta new_block_event e stop_event
     per interrompere il miner corrente entro il prossimo batch.
     """
-    log.info("Watchdog avviato.")
+    log.debug("Watchdog avviato.")
     try:
         last_hash = get_best_block_hash_func(rpc_conn)
     except Exception as e:
@@ -83,4 +83,4 @@ def watchdog_bestblock(
         except Exception as e:
             log.error("Errore watchdog: %s", e)
 
-    log.info("Watchdog fermato.")
+    log.debug("Watchdog fermato.")

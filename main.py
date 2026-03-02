@@ -4,6 +4,7 @@ import threading
 import time
 
 import config
+import log_setup
 from block_builder import (
     build_block_header, build_coinbase_transaction,
     calculate_merkle_root, is_segwit_tx, serialize_block,
@@ -138,8 +139,5 @@ def main(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
+    log_setup.configure()
     main()

@@ -9,6 +9,7 @@ import sys
 import time
 
 import config
+import log_setup
 
 log = logging.getLogger(__name__)
 
@@ -183,10 +184,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
+    log_setup.configure()
 
     mp.set_start_method("spawn", force=True)
     args = _parse_args()

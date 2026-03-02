@@ -1,8 +1,10 @@
+import ctypes
+import hashlib
+import logging
+import os
 import random
 import struct
 import time
-import hashlib
-import logging
 from binascii import hexlify, unhexlify
 from threading import Event
 from typing import Callable
@@ -14,6 +16,35 @@ log = logging.getLogger(__name__)
 # Secondi tra un log di hashrate e il successivo
 _RATE_INT = 2
 
+# ---------------------------------------------------------------------------
+# Caricamento C extension (native/miner_core.so)
+# ---------------------------------------------------------------------------
+
+_SO_PATH = os.path.join(os.path.dirname(__file__), "native", "miner_core.so")
+_lib: ctypes.CDLL | None = None
+
+try:
+    _lib = ctypes.CDLL(_SO_PATH)
+    _lib.find_nonce.restype  = ctypes.c_int64
+    _lib.find_nonce.argtypes = [
+        ctypes.c_char_p,  # header_76
+        ctypes.c_char_p,  # target_be
+        ctypes.c_uint32,  # start_nonce
+        ctypes.c_uint32,  # batch_size
+    ]
+    log.info("C extension caricata: %s (SHA-256 hardware attivo)", _SO_PATH)
+except OSError:
+    log.warning(
+        "C extension non trovata (%s). "
+        "Esegui 'make' in native/ per abilitare il loop SHA-256 ottimizzato. "
+        "Uso fallback Python.",
+        _SO_PATH,
+    )
+
+
+# ---------------------------------------------------------------------------
+# _compute_hash_batch — versione C (veloce) o Python (fallback)
+# ---------------------------------------------------------------------------
 
 def _compute_hash_batch(
     header_76: bytes,
@@ -22,17 +53,23 @@ def _compute_hash_batch(
     target_be: bytes,
 ):
     """
-    Calcola hash per un batch di nonce e ritorna il primo nonce valido trovato.
-
-    Ottimizzazioni:
-    - Precalcolo del primo chunk (64 byte) con sha256.copy() per evitare di
-      rieseguire l'update della parte invariata ad ogni nonce.
-    - Preallocazione di una "tail" (16 byte) aggiornata solo nel campo nonce
-      tramite struct.pack_into, minimizzando allocazioni.
-    - Binding locale di funzioni per ridurre lookup nel loop caldo.
+    Cerca il primo nonce valido in [start_nonce, start_nonce+batch_size).
+    Usa la C extension se disponibile, altrimenti il loop Python.
+    Ritorna (nonce, digest) oppure (None, None).
     """
+    if _lib is not None:
+        result = _lib.find_nonce(header_76, target_be, start_nonce, batch_size)
+        if result < 0:
+            return None, None
+        nonce  = int(result)
+        digest = hashlib.sha256(
+            hashlib.sha256(header_76 + struct.pack("<I", nonce)).digest()
+        ).digest()
+        return nonce, digest
+
+    # --- Fallback Python (stessa logica, ottimizzato con midstate) ---
     first_chunk  = header_76[:64]
-    tail_static  = header_76[64:]   # 12 byte: merkle[28:32] + ts(4) + bits(4)
+    tail_static  = header_76[64:]
 
     sha_base = hashlib.sha256()
     sha_base.update(first_chunk)
@@ -47,16 +84,18 @@ def _compute_hash_batch(
     for i in range(batch_size):
         n = (start_nonce + i) & 0xFFFFFFFF
         pack_into("<I", tail, 12, n)
-
-        ctx = sha_copy()
+        ctx    = sha_copy()
         ctx.update(tail)
         digest = sha256(ctx.digest()).digest()
-
         if digest[::-1] < target_be:
             return n, digest
 
     return None, None
 
+
+# ---------------------------------------------------------------------------
+# mine_block — ciclo principale di mining
+# ---------------------------------------------------------------------------
 
 def mine_block(
     header_hex: str,
@@ -71,7 +110,8 @@ def mine_block(
     Chiama status_callback(attempts, hashrate_hz) ogni ~2 secondi se fornito.
     Ritorna (header_hex_minato, nonce, hashrate) oppure (None, None, None) se interrotto.
     """
-    log.info("Avvio mining — modalità %s", nonce_mode)
+    backend = "C extension" if _lib is not None else "Python fallback"
+    log.info("Avvio mining — modalità %s | backend: %s", nonce_mode, backend)
 
     if nonce_mode not in ("incremental", "random", "mixed"):
         raise ValueError(f"Modalità di mining non valida: {nonce_mode!r}")
@@ -87,7 +127,6 @@ def mine_block(
 
     nonce = 0 if nonce_mode == "incremental" else random.randint(0, 0xFFFFFFFF)
 
-    # Leggi configurazione una volta prima del loop
     batch_size  = config.BATCH
     ts_interval = config.TIMESTAMP_UPDATE_INTERVAL
 
@@ -99,12 +138,11 @@ def mine_block(
 
     while True:
         if stop_event is not None and stop_event.is_set():
-            log.info("Mining interrotto: stop_event ricevuto")
+            log.debug("Mining interrotto: stop_event ricevuto")
             return None, None, None
 
         now = time.time()
 
-        # Aggiornamento periodico del timestamp nell'header
         if ts_interval and (now - last_tsu) >= ts_interval:
             ts_bytes   = struct.pack("<I", int(now))
             header_76  = version + prev_hash + merkle + ts_bytes + bits
@@ -117,8 +155,8 @@ def mine_block(
             hashrate    = (attempts + batch_size) / total if total else 0
             full_header = header_76 + struct.pack("<I", found_nonce)
             log.info(
-                "Blocco trovato - nonce=%d tentativi=%d tempo=%.2fs hashrate=%.2f kH/s",
-                found_nonce, attempts + batch_size, total, hashrate / 1000,
+                "Blocco trovato — nonce=%d | %s hash | %.2fs | %s kH/s",
+                found_nonce, f"{attempts+batch_size:,}", total, f"{hashrate/1000:,.0f}",
             )
             log.info("Hash valido: %s", digest[::-1].hex())
             return hexlify(full_header).decode(), found_nonce, hashrate
@@ -126,15 +164,14 @@ def mine_block(
         attempts += batch_size
         nonce     = (nonce + batch_size) & 0xFFFFFFFF
 
-        # Log e callback periodici
         now = time.time()
         if now - last_rate_t >= _RATE_INT:
             hashrate    = (attempts - last_rate_n) / (now - last_rate_t)
             last_rate_t = now
             last_rate_n = attempts
             log.info(
-                "Stato mining - hashrate=%.2f kH/s tentativi=%d nonce=%d",
-                hashrate / 1000, attempts, nonce,
+                "hashrate %s kH/s  |  %s hash  |  nonce %d",
+                f"{hashrate/1000:,.0f}", f"{attempts:,}", nonce,
             )
             if status_callback:
                 status_callback(attempts, hashrate)

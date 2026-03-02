@@ -138,8 +138,7 @@ def serialize_block(header_hex, coinbase_tx, transactions):
     """
     Serializza l'intero blocco nel formato richiesto dal protocollo Bitcoin.
     """
-    # Messaggio di alto livello → INFO
-    log.info("Serializzazione del blocco avviata")
+    log.debug("Serializzazione del blocco avviata")
 
     # Calcola il numero totale di transazioni (coinbase + transazioni normali)
     num_tx = len(transactions) + 1  # +1 per includere la coinbase
@@ -157,8 +156,7 @@ def serialize_block(header_hex, coinbase_tx, transactions):
     # Assembla il blocco completo: header + contatore tx + coinbase + altre tx
     block_hex = header_hex + num_tx_hex + coinbase_tx + transactions_hex
 
-    # Conferma di successo → INFO
-    log.info("Blocco serializzato correttamente - %d transazioni totali", num_tx)
+    log.debug("Blocco serializzato correttamente - %d transazioni totali", num_tx)
 
     # Dettaglio verboso (potenzialmente migliaia di caratteri) → DEBUG
     log.debug("Blocco HEX: %s", block_hex)
