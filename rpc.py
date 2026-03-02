@@ -50,6 +50,24 @@ def get_block_template(rpc) -> dict | None:
         return None
 
 
+def wait_for_new_template(rpc, longpollid: str) -> None:
+    """
+    Blocca finché Bitcoin Core segnala un nuovo template tramite long-polling.
+
+    Passa longpollid alla chiamata getblocktemplate: il nodo risponde solo
+    quando c'è un nuovo blocco o una variazione significativa delle transazioni.
+    Se la chiamata scade o fallisce, ritorna comunque (il chiamante riproverà).
+
+    Non restituisce il nuovo template — viene ignorato perché main.py lo
+    recupererà con get_block_template() nella normale iterazione del ciclo.
+    """
+    try:
+        rpc.getblocktemplate({"rules": ["segwit"], "longpollid": longpollid})
+        log.debug("Long-poll completato: nuovo template disponibile")
+    except Exception as e:
+        log.debug("Long-poll terminato (timeout o errore): %s", e)
+
+
 def ensure_witness_data(rpc, template: dict) -> None:
     """
     Arricchisce le transazioni del template con i dati witness completi.

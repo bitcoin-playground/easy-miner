@@ -3,7 +3,7 @@ CC      = gcc
 # del processore corrente (su RPi 5 include SHA-256 hardware via +crypto).
 # -fPIC: necessario per shared library.
 # -Wall: abilita i warning principali.
-CFLAGS  = -O3 -march=native -fPIC -Wall
+CFLAGS  = -O3 -march=native -fPIC -Wall -Wno-deprecated-declarations
 LDFLAGS = -lssl -lcrypto
 
 TARGET  = miner_core.so

@@ -5,7 +5,7 @@ Questo progetto implementa un sistema completo di mining Bitcoin educativo che u
 ## Caratteristiche Principali
 
 - **C extension SHA-256 ottimizzata** con loop in C via OpenSSL EVP, ottimizzazione midstate e fallback automatico al loop Python
-- **Istruzioni hardware SHA-256** sfruttate automaticamente da OpenSSL su CPU con ARMv8 Crypto Extensions (es. Raspberry Pi 5 Cortex-A76)
+- **Istruzioni hardware SHA-256** sfruttate automaticamente da OpenSSL su CPU ARM64 (ARMv8 Crypto) e x86_64 (Intel/AMD SHA-NI); con fallback a SHA256 software ottimizzato su CPU più vecchi
 - **Gestione degli extranonce compatibile con Stratum v1** per la comunicazione mining con supporto per extranonce1 ed extranonce2 configurabili
 - **Supporto multi-processo** per il mining parallelo con distribuzione automatica degli extranonce
 - **Gestione avanzata delle transazioni** SegWit e legacy
@@ -147,17 +147,72 @@ L'esecuzione del programma segue un pattern coordinato che rispecchia il funzion
 
 1.  **Prerequisiti**:
     *   Python 3.11+
-    *   Un nodo Bitcoin Core in esecuzione e completamente sincronizzato (o in modalità `regtest` / `testnet`).
-    *   GCC e OpenSSL development headers per compilare la C extension:
-        ```bash
-        sudo apt install gcc libssl-dev
-        ```
+    *   Un nodo Bitcoin Core in esecuzione (modalità `regtest`, `testnet` o `mainnet`).
+    *   Per la C extension (fortemente consigliata):
+        *   **GCC** — compilatore C (pacchetto `gcc`)
+        *   **OpenSSL development headers** — include e librerie per `<openssl/sha.h>` (pacchetto `libssl-dev`)
+        *   **make** — per eseguire il Makefile (pacchetto `make`)
+
+    Su sistemi Debian/Ubuntu:
+    ```bash
+    sudo apt update
+    sudo apt install gcc libssl-dev make
+    ```
+
+    Verifica che OpenSSL 3.x sia disponibile:
+    ```bash
+    openssl version   # atteso: OpenSSL 3.x.x ...
+    ```
 
 2.  **Compilare la C extension** (consigliato per prestazioni ottimali):
+
+    Il file `native/miner_core.c` implementa il loop SHA-256 in C usando l'API `SHA256_CTX` di OpenSSL. Il codice è **portabile**: compila e funziona su qualsiasi architettura Linux con GCC e OpenSSL. Le prestazioni variano in base alle istruzioni hardware disponibili sul CPU:
+
+    | Architettura | CPU di esempio | Accelerazione hardware |
+    |---|---|---|
+    | ARM64 | Raspberry Pi 4/5, AWS Graviton, Apple M1 (Linux) | ARMv8 Crypto (`SHA256H/H2`) — attiva se `sha2` in `/proc/cpuinfo` |
+    | x86_64 moderno | Intel Ice Lake+, AMD Zen+ | SHA-NI (`SHA256RNDS2`) — attiva se `sha_ni` in `/proc/cpuinfo` |
+    | x86_64 generico | Qualsiasi Intel/AMD anche senza SHA-NI | SHA256 software con AVX2/SSE4 — ~3-4× più lento di SHA-NI, ma sempre ~5× più veloce del loop Python |
+
+    In tutti i casi la compilazione è identica. Per verificare quali istruzioni sono disponibili sul proprio CPU:
     ```bash
-    cd native && make
+    grep -o 'sha2\|sha_ni' /proc/cpuinfo | sort -u
     ```
-    Questo produce `native/miner_core.so`. Se saltato, il miner usa automaticamente il loop Python come fallback.
+
+    ```bash
+    cd native
+    make
+    ```
+
+    Il Makefile compila con `-O3 -march=native` (ottimizzazioni massime per la CPU corrente) e produce `native/miner_core.so`. Per una compilazione pulita:
+    ```bash
+    make clean && make
+    ```
+
+    Verifica che la libreria sia stata creata:
+    ```bash
+    ls -lh native/miner_core.so
+    # atteso: file .so di circa 60-70 KB
+    ```
+
+    All'avvio del miner, il log conferma quale backend è attivo:
+    ```
+    INFO  miner         C extension caricata: .../native/miner_core.so (SHA-256 hardware attivo)
+    ```
+    Se la `.so` non è presente o non è compatibile, il miner avvisa e usa il fallback Python senza interrompere l'esecuzione:
+    ```
+    WARN  miner         C extension non trovata (...). Esegui 'make' in native/ per abilitare
+                        il loop SHA-256 ottimizzato. Uso fallback Python.
+    ```
+
+    **Troubleshooting compilazione:**
+
+    | Errore | Causa | Soluzione |
+    |---|---|---|
+    | `fatal error: openssl/sha.h: No such file or directory` | `libssl-dev` non installato | `sudo apt install libssl-dev` |
+    | `gcc: command not found` | GCC non installato | `sudo apt install gcc` |
+    | `make: command not found` | make non installato | `sudo apt install make` |
+    | Warning `deprecated since OpenSSL 3.0` | Normale, non è un errore | Ignorare, il codice funziona |
 
 3.  **Creare e usare un ambiente virtuale (venv)**:
     ```bash

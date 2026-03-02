@@ -11,10 +11,11 @@ from block_builder import (
 )
 from miner import mine_block
 from rpc import (
-    connect_rpc, get_best_block_hash, get_block_template,
+    connect_rpc, get_block_template,
     ensure_witness_data, submit_block, test_rpc_connection,
+    wait_for_new_template,
 )
-from utils import calculate_target, watchdog_bestblock
+from utils import calculate_target, watchdog_longpoll
 
 log = logging.getLogger(__name__)
 
@@ -52,8 +53,9 @@ def main(
     test_rpc_connection()
     log.info("Extranonce2: %s | Coinbase: %s", extranonce2, config.COINBASE_MESSAGE)
 
-    # Connessione principale riutilizzata per tutto il ciclo di vita del processo
-    rpc = connect_rpc()
+    # Connessioni RPC riutilizzate per tutto il ciclo di vita del processo
+    rpc       = connect_rpc()
+    rpc_watch = connect_rpc()  # connessione dedicata al watchdog (può bloccare in long-poll)
 
     # Recupera rete e scriptPubKey una volta sola — non cambiano tra i cicli
     network      = rpc.getblockchaininfo().get("chain", "")
@@ -90,13 +92,13 @@ def main(
                 merkle_root, template["curtime"], template["bits"], 0,
             )
 
-            # STEP 8: avvia watchdog e mining
+            # STEP 8: avvia watchdog long-poll e mining
             stop_event      = threading.Event()
             new_block_event = threading.Event()
-            rpc_watch       = connect_rpc()
+            longpollid      = template.get("longpollid", "")
             t_watch = threading.Thread(
-                target=watchdog_bestblock,
-                args=(rpc_watch, stop_event, new_block_event, get_best_block_hash),
+                target=watchdog_longpoll,
+                args=(rpc_watch, stop_event, new_block_event, longpollid, wait_for_new_template),
                 daemon=True,
             )
             t_watch.start()

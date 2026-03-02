@@ -53,34 +53,32 @@ def calculate_target(template, difficulty_factor: float, network: str) -> str:
     return f"{min(target_value, (1 << 256) - 1):064x}"
 
 
-def watchdog_bestblock(
+def watchdog_longpoll(
     rpc_conn,
     stop_event: threading.Event,
     new_block_event: threading.Event,
-    get_best_block_hash_func,
+    longpollid: str,
+    wait_for_new_template_func,
 ) -> None:
     """
-    Controlla periodicamente se c'è un nuovo best block.
-    Quando viene rilevato, imposta new_block_event e stop_event
+    Watchdog basato su long-polling getblocktemplate.
+
+    Invece di interrogare il nodo ogni CHECK_INTERVAL secondi, chiama
+    getblocktemplate con longpollid: il nodo risponde solo quando c'è
+    un nuovo blocco (latenza < 1 secondo vs i 20 secondi del polling).
+
+    Quando la long-poll ritorna, imposta new_block_event e stop_event
     per interrompere il miner corrente entro il prossimo batch.
     """
-    log.debug("Watchdog avviato.")
-    try:
-        last_hash = get_best_block_hash_func(rpc_conn)
-    except Exception as e:
-        log.error("Watchdog: impossibile ottenere l'hash iniziale: %s", e)
+    log.debug("Watchdog long-poll avviato (longpollid=%s…)", longpollid[:16])
+    if stop_event.is_set():
         return
 
-    while not stop_event.wait(config.CHECK_INTERVAL):
-        try:
-            new_hash = get_best_block_hash_func(rpc_conn)
-            if new_hash and new_hash != last_hash:
-                log.info("Nuovo best block: %s", new_hash)
-                last_hash = new_hash
-                new_block_event.set()
-                stop_event.set()  # interrompe il miner corrente
-                return
-        except Exception as e:
-            log.error("Errore watchdog: %s", e)
+    wait_for_new_template_func(rpc_conn, longpollid)
 
-    log.debug("Watchdog fermato.")
+    if not stop_event.is_set():
+        log.info("Long-poll: nuovo blocco rilevato, interruzione mining")
+        new_block_event.set()
+        stop_event.set()
+
+    log.debug("Watchdog long-poll fermato.")
