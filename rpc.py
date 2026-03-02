@@ -7,6 +7,17 @@ import config
 log = logging.getLogger(__name__)
 
 
+def close_rpc(conn) -> None:
+    """Chiude la connessione HTTP sottostante di un AuthServiceProxy."""
+    if conn is None:
+        return
+    try:
+        conn._AuthServiceProxy__conn.close()
+        log.debug("Connessione RPC chiusa")
+    except Exception:
+        pass
+
+
 def connect_rpc(timeout: int = 30) -> AuthServiceProxy:
     """Crea una connessione RPC al nodo Bitcoin.
 
@@ -22,8 +33,10 @@ def connect_rpc(timeout: int = 30) -> AuthServiceProxy:
 def test_rpc_connection() -> None:
     """Verifica la connessione e mostra informazioni di base sulla blockchain."""
     log.info("Verifica connessione RPC")
+    conn = None
     try:
-        info = connect_rpc().getblockchaininfo()
+        conn = connect_rpc()
+        info = conn.getblockchaininfo()
         log.info(
             "Connessione RPC riuscita — chain=%s, blocchi=%d, difficoltà=%s",
             info["chain"], info["blocks"], info["difficulty"],
@@ -31,6 +44,8 @@ def test_rpc_connection() -> None:
     except Exception:
         log.exception("Errore di connessione RPC")
         raise
+    finally:
+        close_rpc(conn)
 
 
 def get_best_block_hash(rpc) -> str | None:

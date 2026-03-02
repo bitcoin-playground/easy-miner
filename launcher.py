@@ -5,6 +5,7 @@ import importlib
 import logging
 import multiprocessing as mp
 import os
+import signal
 import sys
 import time
 
@@ -160,6 +161,19 @@ def launch(n: int, base_ex2: str) -> None:
         try:
             reason = _aggregate(q, n)
         finally:
+            # Stop graceful: SIGINT permette ai worker di chiudere le RPC in finally.
+            for p in workers:
+                if p.is_alive():
+                    try:
+                        if p.pid is not None:
+                            os.kill(p.pid, signal.SIGINT)
+                    except OSError:
+                        pass
+
+            for p in workers:
+                p.join(timeout=3)
+
+            # Fallback hard-stop su eventuali processi bloccati.
             for p in workers:
                 if p.is_alive():
                     p.terminate()
@@ -201,4 +215,7 @@ if __name__ == "__main__":
     test_rpc_connection()
 
     print(f"\nAvvio mining con {args.num_procs} processi (base extranonce2={args.base_extranonce2})\n")
-    launch(args.num_procs, args.base_extranonce2)
+    try:
+        launch(args.num_procs, args.base_extranonce2)
+    except KeyboardInterrupt:
+        print("\nInterruzione ricevuta — miner arrestato.")

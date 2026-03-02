@@ -10,7 +10,7 @@ from block_builder import (
 )
 from miner import mine_block
 from rpc import (
-    connect_rpc, get_block_template,
+    close_rpc, connect_rpc, get_block_template,
     ensure_witness_data, submit_block, test_rpc_connection,
     wait_for_new_template,
 )
@@ -53,96 +53,110 @@ def main(
     # Inizializzazione con retry: connessioni RPC e dati statici (rete, scriptPubKey).
     # Necessario perché N worker partono in contemporanea e uno può avere un errore
     # RPC transitorio — senza retry il processo muore permanentemente.
-    rpc = rpc_watch = network = miner_script = None
-    while True:
-        try:
-            test_rpc_connection()
-            rpc       = connect_rpc()
-            rpc_watch = connect_rpc(timeout=300)
-            network      = rpc.getblockchaininfo().get("chain", "")
-            miner_script = rpc.getaddressinfo(config.WALLET_ADDRESS)["scriptPubKey"]
-            log.info("Rete: %s", network)
-            break
-        except Exception:
-            log.exception("Errore di inizializzazione — riprovo tra 5s…")
-            time.sleep(5)
-
-    def _on_status(attempts: int, hashrate: float) -> None:
-        if event_queue is not None:
-            event_queue.put(("status", worker_idx, {"rate": hashrate, "attempts": attempts}))
-
-    while True:
-        try:
-            log.info("=== Nuovo ciclo di mining ===")
-
-            # STEP 1-3: template
-            template = _prepare_template(rpc)
-            if not template:
-                log.error("Impossibile ottenere il template. Riprovo tra 5s…")
+    rpc = network = miner_script = None
+    try:
+        while True:
+            try:
+                test_rpc_connection()
+                rpc       = connect_rpc()
+                network      = rpc.getblockchaininfo().get("chain", "")
+                miner_script = rpc.getaddressinfo(config.WALLET_ADDRESS)["scriptPubKey"]
+                log.info("Rete: %s", network)
+                break
+            except Exception:
+                log.exception("Errore di inizializzazione — riprovo tra 5s…")
                 time.sleep(5)
-                continue
 
-            # STEP 4: coinbase
-            coinbase_tx, coinbase_txid = build_coinbase_transaction(
-                template, miner_script,
-                config.EXTRANONCE1, extranonce2,
-                config.COINBASE_MESSAGE,
-            )
-
-            # STEP 5-7: target, merkle root, header
-            modified_target = calculate_target(template, config.DIFFICULTY_FACTOR, network)
-            merkle_root     = calculate_merkle_root(coinbase_txid, template["transactions"])
-            header_hex      = build_block_header(
-                template["version"], template["previousblockhash"],
-                merkle_root, template["curtime"], template["bits"],
-            )
-
-            # STEP 8: avvia watchdog long-poll e mining
-            stop_event      = threading.Event()
-            new_block_event = threading.Event()
-            longpollid      = template.get("longpollid", "")
-            t_watch = threading.Thread(
-                target=watchdog_longpoll,
-                args=(rpc_watch, stop_event, new_block_event, longpollid, wait_for_new_template),
-                daemon=True,
-            )
-            t_watch.start()
-
-            mined_header_hex, nonce, hashrate = mine_block(
-                header_hex, modified_target, config.NONCE_MODE, stop_event, _on_status,
-            )
-
-            stop_event.set()
-            t_watch.join(timeout=0.2)
-
-            if new_block_event.is_set() or mined_header_hex is None:
-                log.info("Ciclo interrotto: riparto con template aggiornato")
-                continue
-
-            # STEP 9: hash del blocco e notifica al supervisore
-            header_bytes = bytes.fromhex(mined_header_hex)
-            block_hash   = double_sha256(header_bytes)[::-1].hex()
-            log.info("Hash del blocco trovato: %s", block_hash)
-
+        def _on_status(attempts: int, hashrate: float) -> None:
             if event_queue is not None:
-                event_queue.put(("found", worker_idx, {"rate": hashrate or 0.0}))
-                event_queue.put(("hash", worker_idx, block_hash))
+                event_queue.put(("status", worker_idx, {"rate": hashrate, "attempts": attempts}))
 
-            # STEP 10: serializza e invia
-            serialized_block = serialize_block(mined_header_hex, coinbase_tx, template["transactions"])
-            if not serialized_block:
-                log.error("Serializzazione blocco fallita. Riprovo…")
-                continue
+        while True:
+            stop_event = None
+            t_watch = None
+            rpc_watch = None
+            try:
+                log.info("=== Nuovo ciclo di mining ===")
 
-            submit_block(rpc, serialized_block)
+                # STEP 1-3: template
+                template = _prepare_template(rpc)
+                if not template:
+                    log.error("Impossibile ottenere il template. Riprovo tra 5s…")
+                    time.sleep(5)
+                    continue
 
-            if event_queue is not None:
-                event_queue.put(("submit", worker_idx, None))
+                # STEP 4: coinbase
+                coinbase_tx, coinbase_txid = build_coinbase_transaction(
+                    template, miner_script,
+                    config.EXTRANONCE1, extranonce2,
+                    config.COINBASE_MESSAGE,
+                )
 
-        except Exception:
-            log.exception("Errore nel ciclo di mining")
+                # STEP 5-7: target, merkle root, header
+                modified_target = calculate_target(template, config.DIFFICULTY_FACTOR, network)
+                merkle_root     = calculate_merkle_root(coinbase_txid, template["transactions"])
+                header_hex      = build_block_header(
+                    template["version"], template["previousblockhash"],
+                    merkle_root, template["curtime"], template["bits"],
+                )
 
-        time.sleep(1)
+                # STEP 8: avvia watchdog long-poll e mining
+                stop_event      = threading.Event()
+                new_block_event = threading.Event()
+                longpollid      = template.get("longpollid", "")
+                rpc_watch       = connect_rpc(timeout=300)
+                t_watch = threading.Thread(
+                    target=watchdog_longpoll,
+                    args=(rpc_watch, stop_event, new_block_event, longpollid, wait_for_new_template),
+                    daemon=True,
+                )
+                t_watch.start()
+
+                mined_header_hex, nonce, hashrate = mine_block(
+                    header_hex, modified_target, config.NONCE_MODE, stop_event, _on_status,
+                )
+
+                if new_block_event.is_set() or mined_header_hex is None:
+                    log.info("Ciclo interrotto: riparto con template aggiornato")
+                    continue
+
+                # STEP 9: hash del blocco e notifica al supervisore
+                header_bytes = bytes.fromhex(mined_header_hex)
+                block_hash   = double_sha256(header_bytes)[::-1].hex()
+                log.info("Hash del blocco trovato: %s", block_hash)
+
+                if event_queue is not None:
+                    event_queue.put(("found", worker_idx, {"rate": hashrate or 0.0}))
+                    event_queue.put(("hash", worker_idx, block_hash))
+
+                # STEP 10: serializza e invia
+                serialized_block = serialize_block(mined_header_hex, coinbase_tx, template["transactions"])
+                if not serialized_block:
+                    log.error("Serializzazione blocco fallita. Riprovo…")
+                    continue
+
+                submit_block(rpc, serialized_block)
+
+                if event_queue is not None:
+                    event_queue.put(("submit", worker_idx, None))
+
+            except Exception:
+                log.exception("Errore nel ciclo di mining")
+            finally:
+                # Chiude SEMPRE la connessione long-poll del ciclo corrente,
+                # anche su blocco trovato, restart template o Ctrl+C.
+                if stop_event is not None:
+                    stop_event.set()
+                close_rpc(rpc_watch)
+                if t_watch is not None:
+                    t_watch.join(timeout=1.0)
+
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        log.info("Interruzione ricevuta — chiusura connessioni RPC")
+    finally:
+        close_rpc(rpc)
 
 
 if __name__ == "__main__":
